@@ -1,0 +1,36 @@
+{
+  "name": "dbmeter",
+  "author": "MakeAwesomeHappen",
+  "version": "1.0.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "dB Meter",
+    "uuid": "a33d786e-81f8-4557-b5b3-4c2323ddfc8b",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "usesPermissions": [
+      {
+        "name": "WatchMicrophone",
+        "reason": "Measures the sound level around you. Audio is analysed on the watch and never recorded or sent anywhere."
+      }
+    ],
+    "messageKeys": [],
+    "resources": {
+      "media": []
+    }
+  }
+}

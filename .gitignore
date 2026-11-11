@@ -53,3 +53,30 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Pebble SDK / waf build output
+/build/
+.lock-waf*
+.waf-*
+.waf3-*
+*.pbw
+
+# Pebble emulator / tooling state
+.pebble-sdk/
+/pebble-screenshot*.png
+/screenshot*.png
+
+# PebbleKit JS dependencies
+node_modules/
+/dist/
+
+# Python (tools/ scripts)
+__pycache__/
+*.pyc
+.venv/
+
+# Editor / OS
+.DS_Store
+*.swp
+.vscode/
+.idea/
