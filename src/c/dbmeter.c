@@ -306,7 +306,7 @@ static void prv_draw_text(GContext *ctx, const char *text, GFont font, GRect box
 }
 
 static void prv_draw_message(GContext *ctx, GRect area, const char *title, const char *body) {
-  const int inset = PBL_IF_ROUND_ELSE(area.size.w / 7, 8);
+  const int inset = PBL_IF_ROUND_ELSE(area.size.w / 5, 8);
   GRect box = grect_inset(area, GEdgeInsets(0, inset));
   GFont title_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
   GFont body_font = fonts_get_system_font(FONT_KEY_GOTHIC_18);
@@ -358,170 +358,271 @@ static void prv_format_duration(char *buf, size_t size, uint32_t secs) {
 
 // ---------------------------------------------------------------------------------- main window
 
-// The status line shared by both views; `normal` is shown when nothing more pressing applies.
+// The status pill shared by both views; `normal` is shown when nothing more pressing applies.
 static void prv_status(const char *normal, const char **text, GColor *color) {
-  *color = PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite);
   if (s_state == MeterStatePaused) {
     *text = "PAUSED";
     *color = PBL_IF_COLOR_ELSE(GColorChromeYellow, GColorWhite);
   } else if (s_state == MeterStateStarting || s_state == MeterStateInterrupted) {
     *text = "STARTING";
+    *color = PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite);
   } else if (!s_calibrated) {
     *text = "UNCALIBRATED";
     *color = PBL_IF_COLOR_ELSE(GColorChromeYellow, GColorWhite);
   } else {
     *text = normal;
+    *color = GColorWhite;
   }
+}
+
+#define HEADER_TOP PBL_IF_ROUND_ELSE(10, 3)
+
+static int prv_header_pill_h(const Fonts *f) {
+  return f->big ? 24 : 20;
+}
+
+// Height the header takes in the vertical stack, including the space below the pill.
+static int prv_header_h(const Fonts *f) {
+  return HEADER_TOP + prv_header_pill_h(f) + (f->big ? 5 : 1);
+}
+
+static void prv_draw_header(GContext *ctx, GRect bounds, int y, const Fonts *f,
+                            const char *normal) {
+  const char *status;
+  GColor status_color;
+  prv_status(normal, &status, &status_color);
+
+  GFont font = fonts_get_system_font(f->big ? FONT_KEY_GOTHIC_18_BOLD
+                                            : FONT_KEY_GOTHIC_14_BOLD);
+  const int h = prv_header_pill_h(f);
+  const int max_w = bounds.size.w - 2 * PBL_IF_ROUND_ELSE(bounds.size.w / 5, 8);
+  GSize size = graphics_text_layout_get_content_size(
+      status, font, GRect(0, 0, max_w, h), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+  int w = size.w + (f->big ? 20 : 14);
+  if (w > max_w) w = max_w;
+  const GRect pill = GRect((bounds.size.w - w) / 2, y + HEADER_TOP, w, h);
+
+  graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorDarkGray, GColorBlack));
+  graphics_fill_rect(ctx, pill, h / 2, GCornersAll);
+#if !defined(PBL_COLOR)
+  graphics_context_set_stroke_color(ctx, GColorWhite);
+  graphics_draw_round_rect(ctx, pill, h / 2);
+#endif
+  prv_draw_text(ctx, status, font, GRect(pill.origin.x, pill.origin.y - 2, pill.size.w, h + 3),
+                GTextAlignmentCenter, status_color);
+}
+
+static const char *prv_level_description(float db) {
+  if (db < 55) return "QUIET";
+  if (db < METER_WARN_DB) return "MODERATE";
+  if (db < METER_DANGER_DB) return "LOUD";
+  if (db < 100) return "VERY LOUD";
+  return "EXTREME";
+}
+
+static void prv_draw_segment_meter(GContext *ctx, GRect bar, bool active, bool have_level,
+                                   float level_db, bool have_max, float max_db) {
+  const int segments = 18;
+  const int gap = bar.size.w >= 150 ? 2 : 1;
+  const int segment_space = bar.size.w - gap * (segments - 1);
+  float frac = (level_db - METER_MIN_DB) / (float)(METER_MAX_DB - METER_MIN_DB);
+  if (frac < 0) frac = 0;
+  if (frac > 1) frac = 1;
+  const int lit = have_level ? (int)(frac * segments + 0.999f) : 0;
+
+  for (int i = 0; i < segments; i++) {
+    const int segment_x = i * segment_space / segments;
+    const int next_x = (i + 1) * segment_space / segments;
+    const int x = bar.origin.x + segment_x + i * gap;
+    const int w = next_x - segment_x;
+    if (i < lit) {
+      const float segment_db = METER_MIN_DB +
+          (i + 0.5f) * (METER_MAX_DB - METER_MIN_DB) / segments;
+      graphics_context_set_fill_color(ctx, active ? prv_level_color(segment_db)
+                                                  : PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite));
+      graphics_fill_rect(ctx, GRect(x, bar.origin.y, w, bar.size.h), 2, GCornersAll);
+    } else {
+#if defined(PBL_COLOR)
+      graphics_context_set_fill_color(ctx, GColorDarkGray);
+      graphics_fill_rect(ctx, GRect(x, bar.origin.y, w, bar.size.h), 2, GCornersAll);
+#else
+      // Unlit on black and white: a thin baseline rather than outlined boxes.
+      graphics_context_set_fill_color(ctx, GColorWhite);
+      graphics_fill_rect(ctx, GRect(x, bar.origin.y + bar.size.h - 2, w, 2), 0, GCornerNone);
+#endif
+    }
+  }
+
+  if (have_max) {
+    float max_frac = (max_db - METER_MIN_DB) / (float)(METER_MAX_DB - METER_MIN_DB);
+    if (max_frac >= 0 && max_frac <= 1) {
+      const int x = bar.origin.x + (int)(max_frac * (bar.size.w - 1));
+      graphics_context_set_stroke_color(ctx, GColorWhite);
+      graphics_draw_line(ctx, GPoint(x, bar.origin.y - 3), GPoint(x, bar.origin.y + bar.size.h + 2));
+    }
+  }
+}
+
+static void prv_draw_metric_card(GContext *ctx, GRect card, const char *label, const char *value,
+                                 bool big) {
+  graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorDarkGray, GColorBlack));
+  graphics_fill_rect(ctx, card, 4, GCornersAll);
+#if !defined(PBL_COLOR)
+  graphics_context_set_stroke_color(ctx, GColorWhite);
+  graphics_draw_round_rect(ctx, card, 4);
+#endif
+  const GColor grey = PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite);
+  prv_draw_text(ctx, label, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+                GRect(card.origin.x, card.origin.y - (big ? 1 : 2), card.size.w, 18),
+                GTextAlignmentCenter, grey);
+  prv_draw_text(ctx, value,
+                fonts_get_system_font(big ? FONT_KEY_GOTHIC_24_BOLD : FONT_KEY_GOTHIC_18_BOLD),
+                GRect(card.origin.x, card.origin.y + (big ? 11 : 9), card.size.w, big ? 30 : 22),
+                GTextAlignmentCenter, GColorWhite);
 }
 
 static void prv_draw_live(Layer *layer, GContext *ctx, GRect bounds, GRect area, const Fonts *f,
                           bool has_accessory, GRect accessory) {
-  GFont label_font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  (void)layer;
   const bool live = (s_state == MeterStateLive);
   const float level_db = prv_calibrated(s_fast_dbfs);
   const bool have_max = s_sess_frames > 0;
-
-  // Vertical stack: status, number, bar, scale, (max). Centred in the unobstructed area.
-  const int bar_h = f->big ? 14 : 10;
-  const int gap = f->big ? 10 : 6;
-  const int scale_h = 16;
-  const int max_h = has_accessory ? 0 : f->status_h;
-  const int total = f->status_h + gap + f->number_h + gap + 4 + bar_h + 2 + scale_h +
-                    (max_h ? gap + max_h : 0);
+  const int header_h = prv_header_h(f);
+  const int desc_h = f->big ? 23 : 19;
+  const int bar_h = f->big ? 13 : 10;
+  const int scale_h = 17;
+  const int footer_h = has_accessory ? 0 : (f->big ? 24 : 20);
+  const int gap = f->big ? 5 : 3;
+  // Must match the y advances below.
+  const int total = header_h + f->number_h + gap + desc_h + gap + bar_h + 1 + scale_h +
+                    (footer_h ? gap + footer_h : 0);
   int y = area.origin.y + (area.size.h - total) / 2;
-  if (y < area.origin.y) {
-    y = area.origin.y;
-  }
-  const int side = PBL_IF_ROUND_ELSE(bounds.size.w / 6, f->big ? 14 : 10);
+  if (y < area.origin.y) y = area.origin.y;
 
-  const char *status;
-  GColor status_color;
-  prv_status("SOUND LEVEL", &status, &status_color);
-  prv_draw_text(ctx, status, f->status_font,
-                GRect(0, y - (f->big ? 6 : 4), bounds.size.w, f->status_h + 6),
-                GTextAlignmentCenter, status_color);
-  y += f->status_h + gap;
+  prv_draw_header(ctx, bounds, y, f, "LIVE");
+  y += header_h;
 
   prv_draw_reading(ctx, f, bounds.size.w / 2, y,
                    live ? GColorWhite : PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite),
                    s_have_power, level_db);
-  y += f->number_h + gap + 4;
+  y += f->number_h + gap;
 
-  // Bar meter
+  // The loudness words describe hearing, so they only apply to A-weighted levels.
+  const bool describe = s_have_power && s_weighting == WeightingA;
+  const char *description = !s_have_power ? "MEASURING"
+                          : describe      ? prv_level_description(level_db)
+                                          : "UNWEIGHTED";
+  prv_draw_text(ctx, description, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                GRect(0, y - 3, bounds.size.w, desc_h + 4), GTextAlignmentCenter,
+                describe && live ? prv_level_color(level_db)
+                                 : PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite));
+  y += desc_h + gap;
+
+  const int side = PBL_IF_ROUND_ELSE(bounds.size.w / 6, f->big ? 14 : 10);
   const GRect bar = GRect(side, y, bounds.size.w - 2 * side, bar_h);
-  graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorDarkGray, GColorWhite));
-  graphics_draw_rect(ctx, bar);
-  if (s_have_power) {
-    float frac = (level_db - METER_MIN_DB) / (float)(METER_MAX_DB - METER_MIN_DB);
-    if (frac < 0) frac = 0;
-    if (frac > 1) frac = 1;
-    const int fill_w = (int)(frac * (bar.size.w - 4));
-    if (fill_w > 0) {
-      graphics_context_set_fill_color(ctx, live ? prv_level_color(level_db)
-                                                : PBL_IF_COLOR_ELSE(GColorDarkGray, GColorWhite));
-      graphics_fill_rect(ctx, GRect(bar.origin.x + 2, bar.origin.y + 2, fill_w, bar.size.h - 4),
-                         0, GCornerNone);
-    }
-  }
-  // MAX marker on the bar
-  if (have_max) {
-    const float mfrac = (prv_calibrated(s_max_dbfs) - METER_MIN_DB) /
-                        (float)(METER_MAX_DB - METER_MIN_DB);
-    if (mfrac >= 0 && mfrac <= 1) {
-      const int mx = bar.origin.x + 2 + (int)(mfrac * (bar.size.w - 4));
-      graphics_context_set_stroke_color(ctx, GColorWhite);
-      graphics_draw_line(ctx, GPoint(mx, bar.origin.y - 2), GPoint(mx, bar.origin.y + bar.size.h + 1));
-    }
-  }
-  y += bar_h + 2;
+  prv_draw_segment_meter(ctx, bar, live, s_have_power, level_db, have_max,
+                         prv_calibrated(s_max_dbfs));
+  y += bar_h + 1;
 
-  // Scale labels
-  static const int s_ticks[] = { 40, 60, 80, 100 };
+  GFont scale_font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  static const int s_ticks[] = { METER_MIN_DB, METER_WARN_DB, METER_DANGER_DB, METER_MAX_DB };
   for (unsigned i = 0; i < ARRAY_LENGTH(s_ticks); i++) {
-    const float frac = (s_ticks[i] - METER_MIN_DB) / (float)(METER_MAX_DB - METER_MIN_DB);
-    const int x = bar.origin.x + 2 + (int)(frac * (bar.size.w - 4));
+    const float tick_frac = (s_ticks[i] - METER_MIN_DB) / (float)(METER_MAX_DB - METER_MIN_DB);
+    const int x = bar.origin.x + (int)(tick_frac * bar.size.w);
     char label[4];
     snprintf(label, sizeof(label), "%d", s_ticks[i]);
-    prv_draw_text(ctx, label, label_font, GRect(x - 15, y - 2, 30, scale_h + 2),
-                  GTextAlignmentCenter, PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite));
+    int label_x = x - 14;
+    if (i == 0) label_x = bar.origin.x - 2;
+    if (i == ARRAY_LENGTH(s_ticks) - 1) label_x = bar.origin.x + bar.size.w - 27;
+    prv_draw_text(ctx, label, scale_font, GRect(label_x, y - 3, 28, scale_h + 3),
+                  i == 0 ? GTextAlignmentLeft :
+                  (i == ARRAY_LENGTH(s_ticks) - 1 ? GTextAlignmentRight : GTextAlignmentCenter),
+                  PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite));
   }
   y += scale_h;
 
-  // MAX: beside the Listening indicator when there is room, otherwise below the scale.
   char max_text[16];
   if (have_max) {
-    snprintf(max_text, sizeof(max_text), "MAX %d", prv_round(prv_calibrated(s_max_dbfs)));
+    snprintf(max_text, sizeof(max_text), "MAX %d %s", prv_round(prv_calibrated(s_max_dbfs)),
+             prv_unit());
   } else {
     strcpy(max_text, "MAX --");
   }
   if (has_accessory) {
     prv_draw_text(ctx, max_text, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
                   GRect(accessory.origin.x, accessory.origin.y + (accessory.size.h - 22) / 2 - 2,
-                        accessory.size.w - 6, 24),
-                  GTextAlignmentRight, GColorWhite);
+                        accessory.size.w - 6, 24), GTextAlignmentRight, GColorWhite);
   } else {
     y += gap;
-    prv_draw_text(ctx, max_text, f->status_font, GRect(0, y - 4, bounds.size.w, f->status_h + 6),
-                  GTextAlignmentCenter, GColorWhite);
+    prv_draw_text(ctx, max_text, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                  GRect(0, y - 3, bounds.size.w, footer_h + 3), GTextAlignmentCenter, GColorWhite);
   }
 }
 
 static void prv_draw_session(Layer *layer, GContext *ctx, GRect bounds, GRect area, const Fonts *f,
                              bool has_accessory, GRect accessory) {
+  (void)layer;
   const bool have = s_sess_frames > 0;
-  const GColor grey = PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite);
-  const int gap = f->big ? 10 : 6;
-  const int row_h = f->status_h;
   const bool show_now = (s_state == MeterStateLive);
-
-  const int total = f->status_h + gap + f->number_h + gap + row_h + gap / 2 + row_h;
+  // Sized to fit the area left by the Listening indicator: 138 px on flint, 190 px on emery.
+  const int header_h = prv_header_h(f);
+  const int label_h = f->big ? 18 : 14;
+  const int card_h = f->big ? 40 : 30;
+  const int time_h = f->big ? 22 : 18;
+  const int gap = f->big ? 5 : 3;
+  // Must match the y advances below.
+  const int total = header_h + f->number_h + gap + label_h + gap + card_h + gap + time_h;
   int y = area.origin.y + (area.size.h - total) / 2;
-  if (y < area.origin.y) {
-    y = area.origin.y;
-  }
+  if (y < area.origin.y) y = area.origin.y;
 
-  const char *status;
-  GColor status_color;
-  prv_status("AVERAGE", &status, &status_color);
-  prv_draw_text(ctx, status, f->status_font,
-                GRect(0, y - (f->big ? 6 : 4), bounds.size.w, f->status_h + 6),
-                GTextAlignmentCenter, status_color);
-  y += f->status_h + gap;
+  prv_draw_header(ctx, bounds, y, f, "SESSION");
+  y += header_h;
 
   const float leq_dbfs = have ? prv_power_to_dbfs((float)(s_sess_energy / (double)s_sess_frames))
                               : DB_FLOOR_DBFS;
   prv_draw_reading(ctx, f, bounds.size.w / 2, y, GColorWhite, have, prv_calibrated(leq_dbfs));
   y += f->number_h + gap;
+  prv_draw_text(ctx, "LEQ AVERAGE", fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+                GRect(0, y - 3, bounds.size.w, label_h + 3), GTextAlignmentCenter,
+                PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite));
+  y += label_h + gap;
 
-  char row[32];
+  const int side = PBL_IF_ROUND_ELSE(bounds.size.w / 6, f->big ? 14 : 9);
+  const int card_gap = f->big ? 8 : 5;
+  const int card_w = (bounds.size.w - 2 * side - card_gap) / 2;
+  char min_value[12];
+  char max_value[12];
   if (have) {
-    snprintf(row, sizeof(row), "MIN %d   MAX %d", prv_round(prv_calibrated(s_min_dbfs)),
-             prv_round(prv_calibrated(s_max_dbfs)));
+    snprintf(min_value, sizeof(min_value), "%d %s", prv_round(prv_calibrated(s_min_dbfs)), prv_unit());
+    snprintf(max_value, sizeof(max_value), "%d %s", prv_round(prv_calibrated(s_max_dbfs)), prv_unit());
   } else {
-    strcpy(row, "MIN --   MAX --");
+    strcpy(min_value, "--");
+    strcpy(max_value, "--");
   }
-  prv_draw_text(ctx, row, f->status_font, GRect(0, y - 4, bounds.size.w, row_h + 6),
-                GTextAlignmentCenter, GColorWhite);
-  y += row_h + gap / 2;
+  prv_draw_metric_card(ctx, GRect(side, y, card_w, card_h), "MIN", min_value, f->big);
+  prv_draw_metric_card(ctx, GRect(side + card_w + card_gap, y, card_w, card_h),
+                       "MAX", max_value, f->big);
+  y += card_h + gap;
 
   // Time measured; the current level goes beside the Listening indicator, or on this row.
   char duration[12];
-  prv_format_duration(duration, sizeof(duration), s_sess_frames / FRAMES_PER_SEC);
   char now[16];
+  char time_text[32];
+  prv_format_duration(duration, sizeof(duration), s_sess_frames / FRAMES_PER_SEC);
   snprintf(now, sizeof(now), "NOW %d", prv_round(prv_calibrated(s_fast_dbfs)));
   if (show_now && !has_accessory) {
-    snprintf(row, sizeof(row), "%s   %s", duration, now);
+    snprintf(time_text, sizeof(time_text), "TIME %s   %s", duration, now);
   } else {
-    snprintf(row, sizeof(row), "TIME %s", duration);
+    snprintf(time_text, sizeof(time_text), "TIME  %s", duration);
   }
-  prv_draw_text(ctx, row, f->status_font, GRect(0, y - 4, bounds.size.w, row_h + 6),
-                GTextAlignmentCenter, grey);
+  prv_draw_text(ctx, time_text, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                GRect(0, y - 3, bounds.size.w, time_h + 3), GTextAlignmentCenter,
+                PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite));
 
   if (show_now && has_accessory) {
     prv_draw_text(ctx, now, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
                   GRect(accessory.origin.x, accessory.origin.y + (accessory.size.h - 22) / 2 - 2,
-                        accessory.size.w - 6, 24),
-                  GTextAlignmentRight, GColorWhite);
+                        accessory.size.w - 6, 24), GTextAlignmentRight, GColorWhite);
   }
 }
 
