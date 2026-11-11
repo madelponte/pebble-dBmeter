@@ -16,7 +16,6 @@
 
 #define FRAMES_PER_SEC 50
 #define FAST_ALPHA 0.148f           // 1 - exp(-20 ms / 125 ms)
-#define REDRAW_EVERY_FRAMES 10      // 200 ms
 #define WARMUP_FRAMES 5             // filter transient after (re)start: Fast level just follows
 #define SETTLE_FRAMES 15            // session stats start after this
 #define DB_FLOOR_DBFS -100.0f
@@ -33,6 +32,24 @@
 #define PERSIST_CALIBRATED 4        // bool: the user has been through the Calibrate screen
 #define PERSIST_CAL_OFFSET 5        // int: user calibration offset in dB
 #define PERSIST_WEIGHTING 6         // int: Weighting
+#define PERSIST_REFRESH 7           // int: index into s_refresh_options
+
+// How often the screen shows a new reading. Measuring runs on every 20 ms frame whatever this is,
+// so MAX and the average miss nothing; a slower refresh just redraws (and wakes the display) less.
+typedef struct {
+  int frames;
+  const char *label;
+} RefreshOption;
+
+static const RefreshOption s_refresh_options[] = {
+  {   5, "Every 0.1 s" },
+  {  10, "Every 0.2 s (default)" },
+  {  25, "Every 0.5 s" },
+  {  50, "Every 1 s" },
+  { 100, "Every 2 s" },
+};
+#define REFRESH_COUNT ((int)ARRAY_LENGTH(s_refresh_options))
+#define REFRESH_DEFAULT 1
 
 // ----------------------------------------------------------------------------------------- state
 
@@ -68,6 +85,7 @@ static View s_view = ViewLive;
 static Weighting s_weighting = WeightingA;
 static int s_cal_offset;            // user calibration, dB
 static bool s_calibrated;
+static int s_refresh = REFRESH_DEFAULT;  // index into s_refresh_options
 
 static AWeightFilter s_filter;
 static float s_fast_power;          // mean-square, normalised to full-scale sine = 1.0
@@ -181,7 +199,9 @@ static void prv_mic_data(const int16_t *samples, size_t count, void *context) {
     s_state = MeterStateLive;
     prv_redraw();
   }
-  if (s_frames % REDRAW_EVERY_FRAMES == 0) {
+  // Calibrating means matching a reference meter by eye, so that screen keeps the default rate.
+  const int refresh = s_cal_canvas ? REFRESH_DEFAULT : s_refresh;
+  if (s_frames % s_refresh_options[refresh].frames == 0) {
     prv_redraw();
   }
 }
@@ -800,6 +820,7 @@ static void prv_open_calibration(void) {
 
 enum {
   MenuRowWeighting,
+  MenuRowRefresh,
   MenuRowCalibrate,
   MenuRowReset,
   MenuRowCount,
@@ -816,6 +837,9 @@ static void prv_menu_draw_row(GContext *ctx, const Layer *cell, MenuIndex *index
       menu_cell_basic_draw(ctx, cell, "Weighting",
                            s_weighting == WeightingA ? "A: dBA (hearing)" : "Z: flat, unweighted",
                            NULL);
+      break;
+    case MenuRowRefresh:
+      menu_cell_basic_draw(ctx, cell, "Refresh", s_refresh_options[s_refresh].label, NULL);
       break;
     case MenuRowCalibrate:
       if (s_cal_offset == 0) {
@@ -835,6 +859,11 @@ static void prv_menu_select(MenuLayer *menu, MenuIndex *index, void *context) {
   switch (index->row) {
     case MenuRowWeighting:
       prv_set_weighting(s_weighting == WeightingA ? WeightingZ : WeightingA);
+      menu_layer_reload_data(menu);
+      break;
+    case MenuRowRefresh:
+      s_refresh = (s_refresh + 1) % REFRESH_COUNT;
+      persist_write_int(PERSIST_REFRESH, s_refresh);
       menu_layer_reload_data(menu);
       break;
     case MenuRowCalibrate:
@@ -970,6 +999,12 @@ static void prv_init(void) {
   s_calibrated = persist_read_bool(PERSIST_CALIBRATED);
   if (persist_exists(PERSIST_WEIGHTING)) {
     s_weighting = (persist_read_int(PERSIST_WEIGHTING) == WeightingZ) ? WeightingZ : WeightingA;
+  }
+  if (persist_exists(PERSIST_REFRESH)) {
+    s_refresh = persist_read_int(PERSIST_REFRESH);
+    if (s_refresh < 0 || s_refresh >= REFRESH_COUNT) {
+      s_refresh = REFRESH_DEFAULT;
+    }
   }
 
   s_main_window = window_create();

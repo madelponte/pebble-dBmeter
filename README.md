@@ -29,6 +29,7 @@ doesn't count. Changing the weighting starts a new session.
 | Item          | What it does                                                          |
 | ------------- | --------------------------------------------------------------------- |
 | Weighting     | **A** (dBA, default): matches human hearing; what most meters and hearing-safety guidance use. **Z**: flat, unweighted. |
+| Refresh       | How often the reading on screen updates: every 0.1, **0.2** (default), 0.5, 1 or 2 s. Select cycles through them. Slower saves battery; measuring still runs on every 20 ms frame, so MAX and the average miss nothing. The Calibrate screen always updates every 0.2 s. |
 | Calibrate     | Opens the Calibrate screen (below).                                   |
 | Reset session | Clears average, min, max and time.                                    |
 
@@ -52,7 +53,7 @@ readings are `dBFS + 120` (a typical MEMS mic gives −26 dBFS at 94 dB SPL).
 ## How it measures
 
 * 16 kHz mono audio arrives in 20 ms frames.
-* **A-weighting** (`src/c/aweight.c`) is three fixed-point biquads (the watch CPU has no FPU),
+* **A-weighting** (`src/c/aweight.c`) is three fixed-point biquads (apps are built soft-float),
   within 0.1 dB of the IEC 61672 curve from 10 Hz to 7 kHz. The low-frequency poles come from a
   bilinear transform; the 12.2 kHz poles lie above Nyquist, so the high-frequency roll-off is a
   fitted biquad. **Z** just removes DC.

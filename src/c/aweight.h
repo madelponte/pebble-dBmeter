@@ -6,7 +6,7 @@
 // Three biquads; within 0.1 dB of the standard curve from 10 Hz to 7 kHz.
 
 typedef struct {
-  int32_t state[3][4];  // per section: x1, x2, y1, y2
+  int32_t z[4][2];  // last two values at the input, between sections, and at the output
 } AWeightFilter;
 
 void aweight_reset(AWeightFilter *filter);

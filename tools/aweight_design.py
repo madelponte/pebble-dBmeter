@@ -106,6 +106,15 @@ g *= 10 ** (a_weight_db([1000.0])[0] / 20)
 # Put the gain into section 3's numerator.
 s3 = (s3[0] * g, s3[1])
 
+# Sections 1 and 2 have a double zero at DC, so their numerators are b0 * (1 - 2z^-1 + z^-2).
+# Move both b0 gains into section 3: sections 1 and 2 then need no numerator multiplies at all,
+# and their DC zeros are exact instead of quantised.
+for s in (s1, s2):
+    assert np.allclose(s[0] / s[0][0], [1, -2, 1])
+s3 = (s3[0] * s1[0][0] * s2[0][0], s3[1])
+s1 = (np.array([1.0, -2.0, 1.0]), s1[1])
+s2 = (np.array([1.0, -2.0, 1.0]), s2[1])
+
 sections = [s1, s2, s3]
 
 
@@ -113,29 +122,46 @@ def quant(x):
     return int(round(x * (1 << Q)))
 
 
+# Feedback coefficients are stored negated (-a1, -a2) so the C code only ever accumulates.
 qsec = []
 for b, a in sections:
-    qsec.append(([quant(v) for v in b], [quant(v) for v in a[1:]]))
+    qsec.append(([quant(v) for v in b], [-quant(v) for v in a[1:]]))
 
-# Fixed-point simulation of the C implementation.
+# Fixed-point simulation of the C implementation (bit-exact with src/c/aweight.c).
 IN_SHIFT = 12
+OUT_SHIFT = IN_SHIFT - 6
+I32 = (-(1 << 31), 1 << 31)
+
+
+def fits32(*vals):
+    for v in vals:
+        assert I32[0] <= v < I32[1], "overflow"
 
 
 def run_fixed(x16):
-    st = [[0, 0, 0, 0] for _ in qsec]   # x1, x2, y1, y2
+    # Direct form I, cascaded: each section's output history is the next section's input history,
+    # so the state is just the last two values at each of the 4 nodes.
+    z = [[0, 0] for _ in range(4)]
     out = []
     half = 1 << (Q - 1)
+    (_, na_1), (_, na_2), (b3, na_3) = qsec
     for s in x16:
-        v = int(s) << IN_SHIFT
-        for (b, a), S in zip(qsec, st):
-            acc = b[0] * v + b[1] * S[0] + b[2] * S[1] - a[0] * S[2] - a[1] * S[3]
-            y = (acc + half) >> Q
-            assert -(1 << 31) <= y < (1 << 31), "overflow"
-            S[1], S[0] = S[0], v
-            S[3], S[2] = S[2], y
-            v = y
-        out.append(v)
-    return np.array(out, dtype=float) / (1 << IN_SHIFT)
+        x = int(s) << IN_SHIFT
+        u = x - 2 * z[0][0] + z[0][1]
+        fits32(u, 2 * z[0][0])
+        u += (half + na_1[0] * z[1][0] + na_1[1] * z[1][1]) >> Q
+        fits32(u)
+        v = u - 2 * z[1][0] + z[1][1]
+        fits32(v, 2 * z[1][0])
+        v += (half + na_2[0] * z[2][0] + na_2[1] * z[2][1]) >> Q
+        fits32(v)
+        y = (half + b3[0] * v + b3[1] * z[2][0] + b3[2] * z[2][1]
+             + na_3[0] * z[3][0] + na_3[1] * z[3][1]) >> Q
+        fits32(y)
+        for node, val in zip(z, (x, u, v, y)):
+            node[1], node[0] = node[0], val
+        out.append(y >> OUT_SHIFT)
+    return np.array(out, dtype=float) / (1 << (IN_SHIFT - OUT_SHIFT))
 
 
 # IEC 61672-1 class 2 tolerances (approx) at third-octave centres
@@ -163,8 +189,14 @@ print("worst |err| 20 Hz..7 kHz:", round(worst, 2), "dB")
 rng = np.random.default_rng(1)
 run_fixed(np.clip(rng.normal(0, 20000, 16000), -32768, 32767))
 run_fixed(np.where(np.arange(16000) % 2, 32767, -32768))
+run_fixed(np.where(np.arange(16000) // 400 % 2, 32767, -32768))   # full-scale 20 Hz square: steps
+peak = fit_f[np.argmax(a_weight_db(fit_f))]
+run_fixed(np.round(32767 * np.sin(2 * np.pi * peak * np.arange(16000) / FS)))
 print("overflow checks passed")
 
-print("\n// C coefficients, Q%d: {b0, b1, b2, a1, a2}" % Q)
-for b, a in qsec:
-    print("  {%d, %d, %d, %d, %d}," % (b[0], b[1], b[2], a[0], a[1]))
+(_, na_1), (_, na_2), (b3, na_3) = qsec
+print("\n// C coefficients, Q%d (feedback negated)" % Q)
+print("#define S1_NA1 %d\n#define S1_NA2 %d" % tuple(na_1))
+print("#define S2_NA1 %d\n#define S2_NA2 %d" % tuple(na_2))
+print("#define S3_B0 %d\n#define S3_B1 %d\n#define S3_B2 %d" % tuple(b3))
+print("#define S3_NA1 %d\n#define S3_NA2 %d" % tuple(na_3))
